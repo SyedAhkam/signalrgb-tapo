@@ -1,45 +1,112 @@
 // =============================================================================
-// Tapo L900 Light Strip — SignalRGB Plugin
+// Tapo L900 Light Strip — SignalRGB Plugin  v2.0.0
 // Requires: tapo-rest running locally (https://github.com/ClementNerma/tapo-rest)
+// Transport: XMLHttpRequest
 // =============================================================================
 
-import { http } from "network";
+// Controllable parameter globals — declared as var so the SignalRGB runtime
+// can overwrite them; defaults are used until the first Render() injection.
+var LightingMode    = "Canvas";
+var forcedColor     = "0099ff";
+var brightnessScale = "100";
 
 // -- Configuration ------------------------------------------------------------
-// Edit these to match your tapo-rest setup
 
-const SERVER      = "http://127.0.0.1:7000";   // tapo-rest base URL
-const PASSWORD    = "qel4a9xyg5";     // server_password from config
-const DEVICE_NAME = "desk-light";        // device name from config
-const DEVICE_TYPE = "l900";                     // route prefix (check GET /actions)
+const HOST        = "127.0.0.1";
+const PORT        = 7000;
+const PASSWORD    = "qel4a9xyg5";
+const DEVICE_NAME = "desk-light";
+const DEVICE_TYPE = "l900";
 
-// How many canvas frames to skip between HTTP calls.
-// 30fps default in SignalRGB → 6 = ~5 updates/sec. Raise if the bulb struggles.
+// Minimum canvas frames between sends (~5fps at SignalRGB's default 30fps)
 const FRAME_SKIP  = 6;
 
-// Minimum color delta (0–100) before we bother sending a new command.
-// Reduces hammering the device when the canvas is mostly static.
+// Minimum HSV delta (0–100) before sending a new command
 const MIN_DELTA   = 3;
-
-// =============================================================================
 
 let sessionToken   = null;
 let frameCounter   = 0;
+let requestPending = false;
 let lastHue        = -1;
 let lastSat        = -1;
 let lastBri        = -1;
 
 // -- Device identity ----------------------------------------------------------
 
-export function Name()      { return "Tapo L900 (tapo-rest)"; }
+export function Name()      { return "Tapo L900"; }
 export function Publisher() { return "SignalRGB Community"; }
-export function Version()   { return "1.0.0"; }
+export function Version()   { return "2.0.0"; }
 export function Type()      { return "network"; }
 
-// Canvas size — wide strip shape. Adjust to taste.
-export function Size()         { return [20, 2]; }
-export function LedNames()     { return ["Strip"]; }
-export function LedPositions() { return [[10, 1]]; }
+export function SubdeviceController() { return true; }
+
+export function DefaultPosition() { return [0, 0]; }
+export function DefaultScale()    { return 1.0; }
+
+export function Size() { return [20, 2]; }
+
+// -- Discovery service --------------------------------------------------------
+
+export function DiscoveryService() {
+    // Called once when SignalRGB loads the plugin.
+    this.Initialize = function() {
+        service.log("[TapoL900] Discovery initializing — announcing " + HOST + ":" + PORT + " / " + DEVICE_NAME);
+        this.announce();
+    };
+
+    // Called periodically by SignalRGB. Announces pending controllers and
+    // re-announces if the controller was lost.
+    this.Update = function() {
+        for (const cont of service.controllers) {
+            const bridge = cont.obj;
+            if (!bridge.announced) {
+                bridge.announced = true;
+                service.log("[TapoL900] Announcing controller: " + bridge.name);
+                service.announceController(bridge);
+            }
+        }
+
+        const id = HOST + ":" + PORT + "/" + DEVICE_NAME;
+        if (service.getController(id) === undefined) {
+            this.announce();
+        }
+    };
+
+    // Creates a TapoBridge and registers it with SignalRGB.
+    this.Discovered = function(value) {
+        if (service.getController(value.id) === undefined) {
+            service.addController(new TapoBridge(value));
+        }
+    };
+
+    this.announce = function() {
+        this.Discovered({
+            id:         HOST + ":" + PORT + "/" + DEVICE_NAME,
+            name:       "Tapo " + DEVICE_TYPE.toUpperCase() + " – " + DEVICE_NAME,
+            ip:         HOST,
+            port:       PORT,
+            password:   PASSWORD,
+            deviceName: DEVICE_NAME,
+            deviceType: DEVICE_TYPE,
+        });
+    };
+}
+
+// Holds per-device connection state. Passed to the plugin instance as `controller`.
+class TapoBridge {
+    constructor(value) {
+        this.id         = value.id;
+        this.name       = value.name;
+        this.ip         = value.ip;
+        this.port       = value.port;
+        this.password   = value.password;
+        this.deviceName = value.deviceName;
+        this.deviceType = value.deviceType;
+        this.announced  = false;  // set true by Update() before announcing
+
+        service.log("[TapoL900] Controller ready: " + this.name + " @ " + this.ip + ":" + this.port);
+    }
+}
 
 export function ControllableParameters() {
     return [
@@ -59,7 +126,7 @@ export function ControllableParameters() {
             default:  "0099ff"
         },
         {
-            property: "brightness",
+            property: "brightnessScale",
             group:    "lighting",
             label:    "Brightness (%)",
             type:     "number",
@@ -74,12 +141,13 @@ export function ControllableParameters() {
 // -- Lifecycle ----------------------------------------------------------------
 
 export function Initialize() {
+    device.setName(controller.name);
+    device.addChannel("Strip", 40);
     login();
 }
 
 export function Render() {
     if (sessionToken === null) {
-        // Retry login if we don't have a token yet
         login();
         return;
     }
@@ -87,6 +155,8 @@ export function Render() {
     frameCounter++;
     if (frameCounter < FRAME_SKIP) return;
     frameCounter = 0;
+
+    if (requestPending) return;
 
     let r, g, b;
 
@@ -97,14 +167,11 @@ export function Render() {
     }
 
     const [h, s, v] = rgbToHsv(r, g, b);
+    const scaledBri = Math.round(v * (parseInt(brightnessScale) / 100));
 
-    // Scale brightness by the user slider
-    const scaledBri = Math.round(v * (parseInt(brightness) / 100));
-
-    // Skip send if nothing meaningful changed
     if (
-        Math.abs(h - lastHue) < MIN_DELTA &&
-        Math.abs(s - lastSat) < MIN_DELTA &&
+        Math.abs(h - lastHue)         < MIN_DELTA &&
+        Math.abs(s - lastSat)         < MIN_DELTA &&
         Math.abs(scaledBri - lastBri) < MIN_DELTA
     ) return;
 
@@ -116,73 +183,109 @@ export function Render() {
 }
 
 export function Shutdown() {
-    // Return to a neutral warm white so the strip doesn't go dark
     if (sessionToken) {
-        apiGet(`/actions/${DEVICE_TYPE}/set-color-temperature?device=${DEVICE_NAME}&color_temperature=3000`);
+        httpGet(
+            `/actions/${controller.deviceType}/set-color-temperature?device=${controller.deviceName}&color_temperature=3000`,
+            null
+        );
     }
 }
 
-// -- Helpers ------------------------------------------------------------------
+// -- HTTP helpers -------------------------------------------------------------
+
+// callback(statusCode, responseBody) — called once when the request completes.
+function httpRequest(method, path, bodyObj, callback) {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, `http://${controller.ip}:${controller.port}${path}`, true);
+
+    if (sessionToken) {
+        xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
+    }
+    if (bodyObj) {
+        xhr.setRequestHeader("Content-Type", "application/json");
+    }
+
+    xhr.onreadystatechange = function() {
+        if (xhr.readyState === 4) {
+            if (callback) callback(xhr.status, xhr.responseText);
+        }
+    };
+
+    xhr.send(bodyObj ? JSON.stringify(bodyObj) : null);
+}
+
+// Convenience wrappers
+function httpPost(path, bodyObj, callback) {
+    httpRequest("POST", path, bodyObj, callback);
+}
+
+function httpGet(path, callback) {
+    httpRequest("GET", path, null, callback);
+}
+
+// -- Auth & color commands ----------------------------------------------------
 
 function login() {
-    try {
-        const response = http.post(
-            `${SERVER}/login`,
-            JSON.stringify({ password: PASSWORD }),
-            { "Content-Type": "application/json" }
-        );
+    if (requestPending) return;
+    requestPending = true;
 
-        if (response && response.body) {
-            // tapo-rest returns the raw session ID as a string
-            sessionToken = response.body.trim().replace(/^"|"$/g, "");
+    httpPost("/login", { password: controller.password }, (status, body) => {
+        requestPending = false;
+        if (status === 200) {
+            // tapo-rest returns the token as a quoted JSON string
+            sessionToken = body.trim().replace(/^"|"$/g, "");
+        } else {
+            device.log(`[TapoL900] Login failed (HTTP ${status})`);
         }
-    } catch (e) {
-        sessionToken = null;
-    }
+    });
 }
 
 function sendColor(hue, saturation, bri) {
-    // Turn on first if needed, then set hue+sat, then brightness
-    // Adjust route names below to match what GET /actions returns for your server
+    const dt = controller.deviceType;
+    const dn = controller.deviceName;
+
     if (bri === 0) {
-        apiGet(`/actions/${DEVICE_TYPE}/off?device=${DEVICE_NAME}`);
+        requestPending = true;
+        httpGet(`/actions/${dt}/off?device=${dn}`, () => {
+            requestPending = false;
+        });
         return;
     }
 
-    apiGet(`/actions/${DEVICE_TYPE}/on?device=${DEVICE_NAME}`);
-    apiGet(`/actions/${DEVICE_TYPE}/set-hue-saturation?device=${DEVICE_NAME}&hue=${hue}&saturation=${saturation}`);
-    apiGet(`/actions/${DEVICE_TYPE}/set-brightness?device=${DEVICE_NAME}&level=${bri}`);
-}
+    requestPending = true;
 
-function apiGet(path) {
-    try {
-        const response = http.get(
-            `${SERVER}${path}`,
-            { "Authorization": `Bearer ${sessionToken}` }
+    // Chain three commands sequentially: on → hue/sat → brightness
+    httpGet(`/actions/${dt}/on?device=${dn}`, (s1) => {
+        if (s1 === 401) { sessionToken = null; requestPending = false; return; }
+
+        httpGet(
+            `/actions/${dt}/set-hue-saturation?device=${dn}&hue=${hue}&saturation=${saturation}`,
+            (s2) => {
+                if (s2 === 401) { sessionToken = null; requestPending = false; return; }
+
+                httpGet(
+                    `/actions/${dt}/set-brightness?device=${dn}&level=${bri}`,
+                    (s3) => {
+                        if (s3 === 401) { sessionToken = null; }
+                        requestPending = false;
+                    }
+                );
+            }
         );
-
-        // If we get a 401, our session expired — re-login next frame
-        if (response && response.status === 401) {
-            sessionToken = null;
-        }
-    } catch (e) {
-        // Swallow errors; the device may be temporarily unreachable
-    }
+    });
 }
+
+// -- Canvas / color helpers ---------------------------------------------------
 
 function averageCanvas() {
-    const [w, h] = Size();
+    const colors = device.channel("Strip").getColors("Inline"); // [R,G,B, R,G,B, ...]
+    const count  = colors.length / 3;
     let rSum = 0, gSum = 0, bSum = 0;
-    let count = 0;
 
-    for (let x = 0; x < w; x++) {
-        for (let y = 0; y < h; y++) {
-            const col = device.color(x, y);
-            rSum += (col >> 16) & 0xff;
-            gSum += (col >> 8)  & 0xff;
-            bSum += col         & 0xff;
-            count++;
-        }
+    for (let i = 0; i < colors.length; i += 3) {
+        rSum += colors[i];
+        gSum += colors[i + 1];
+        bSum += colors[i + 2];
     }
 
     return [
@@ -192,7 +295,7 @@ function averageCanvas() {
     ];
 }
 
-// RGB (0–255) → HSV where H=0–360, S=0–100, V=0–100
+// RGB (0–255) → [H 0–360, S 0–100, V 0–100]
 function rgbToHsv(r, g, b) {
     r /= 255; g /= 255; b /= 255;
 
