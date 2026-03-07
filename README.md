@@ -17,6 +17,8 @@ A community plugin for [SignalRGB](https://signalrgb.com) that syncs TP-Link Tap
 
 Any device registered in tapo-rest will be auto-discovered — including models not listed above (they'll be treated as on/off switches).
 
+> **Tested hardware:** L900 only. Other models are implemented based on the tapo-rest API but have not been verified. Community reports welcome.
+
 ---
 
 ## Prerequisites
