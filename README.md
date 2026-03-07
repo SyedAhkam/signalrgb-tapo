@@ -32,7 +32,7 @@ Follow the tapo-rest setup guide to:
 
 ### 2. SignalRGB
 
-[Download SignalRGB](https://signalrgb.com). The plugin is loaded from the local plugins folder — no store installation needed.
+[Download SignalRGB](https://signalrgb.com) if you haven't already.
 
 ---
 
