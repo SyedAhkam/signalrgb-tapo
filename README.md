@@ -143,13 +143,11 @@ function deviceCaps(type) {
 
 All RGBIC strips — including the L900, L920, and L930 — are currently driven as a **single solid color**, computed by averaging the SignalRGB canvas. The strip is registered as 40 LEDs in the layout intentionally, to give it a wider canvas footprint for a more representative color sample — not because 40 colors are sent to the hardware. Per-segment color control is not supported.
 
-This is a limitation of the [tapo-rest](https://github.com/ClementNerma/tapo-rest) API layer, not the plugin itself:
+This is a limitation of the Tapo web service, not the plugin itself:
 
 - **L900** — Single color only by design. TP-Link does not expose per-segment control for this model at the hardware level. The entire strip always shows one solid color.
 
-- **L920 / L930** — These strips do have individually addressable segments. The `tapo` crate exposes a `LightingEffect` API with a `sequence: Vec<[u16; 3]>` (HSV per segment) that could map canvas zones to hardware segments. However, tapo-rest does not currently expose a custom lighting effect endpoint — only preset effects via `set-lighting-effect`. A new endpoint (e.g. `set-segment-colors`) would need to be contributed upstream to tapo-rest before this plugin could use it.
-
-If you'd like to help implement L920/L930 addressable support, the relevant upstream issue is in the [tapo-rest](https://github.com/ClementNerma/tapo-rest) repository.
+- **L920 / L930** — These strips do have individually addressable segments, but TP-Link's Tapo web service does not expose per-segment color control through its API. Until the service exposes such an endpoint, per-segment support cannot be implemented.
 
 ---
 
